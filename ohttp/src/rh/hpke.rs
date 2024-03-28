@@ -11,6 +11,9 @@ use hpke::{
     setup_receiver, setup_sender, Deserializable, OpModeR, OpModeS, Serializable,
 };
 
+#[cfg(feature = "k256")]
+use hpke::kem::DhK256HkdfSha256;
+
 use ::rand::thread_rng;
 use log::trace;
 use std::ops::Deref;
@@ -60,6 +63,9 @@ impl Default for Config {
 #[derive(Clone)]
 pub enum PublicKey {
     X25519(<X25519HkdfSha256 as KemTrait>::PublicKey),
+
+    #[cfg(feature = "k256")]
+    K256(<DhK256HkdfSha256 as KemTrait>::PublicKey),
 }
 
 impl PublicKey {
@@ -67,6 +73,9 @@ impl PublicKey {
     pub fn key_data(&self) -> Res<Vec<u8>> {
         Ok(match self {
             Self::X25519(k) => Vec::from(k.to_bytes().as_slice()),
+
+            #[cfg(feature = "k256")]
+            Self::K256(k) => Vec::from(k.to_bytes().as_slice()),
         })
     }
 }
@@ -85,6 +94,9 @@ impl std::fmt::Debug for PublicKey {
 #[derive(Clone)]
 pub enum PrivateKey {
     X25519(<X25519HkdfSha256 as KemTrait>::PrivateKey),
+
+    #[cfg(feature = "k256")]
+    K256(<DhK256HkdfSha256 as KemTrait>::PrivateKey),
 }
 
 impl PrivateKey {
@@ -92,6 +104,9 @@ impl PrivateKey {
     pub fn key_data(&self) -> Res<Vec<u8>> {
         Ok(match self {
             Self::X25519(k) => Vec::from(k.to_bytes().as_slice()),
+
+            #[cfg(feature = "k256")]
+            Self::K256(k) => Vec::from(k.to_bytes().as_slice()),
         })
     }
 }
@@ -113,12 +128,24 @@ enum SenderContextX25519HkdfSha256HkdfSha256 {
     ChaCha20Poly1305(Box<AeadCtxS<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
 }
 
+enum SenderContextK256HkdfSha256 {
+    ChaCha20Poly1305(Box<AeadCtxS<ChaCha20Poly1305, HkdfSha256, DhK256HkdfSha256>>),
+}
+
 enum SenderContextX25519HkdfSha256 {
     HkdfSha256(SenderContextX25519HkdfSha256HkdfSha256),
 }
 
+#[cfg(feature = "k256")]
+enum SenderContextK256 {
+    HkdfSha256(SenderContextK256HkdfSha256),
+}
+
 enum SenderContext {
     X25519HkdfSha256(SenderContextX25519HkdfSha256),
+
+    #[cfg(feature = "k256")]
+    K256(SenderContextK256),
 }
 
 impl SenderContext {
@@ -136,6 +163,14 @@ impl SenderContext {
                 let tag = context.seal_in_place_detached(plaintext, aad)?;
                 Vec::from(tag.to_bytes().as_slice())
             }
+
+            #[cfg(feature = "k256")]
+            Self::K256(SenderContextK256::HkdfSha256(
+                SenderContextK256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                let tag = context.seal_in_place_detached(plaintext, aad)?;
+                Vec::from(tag.to_bytes().as_slice())
+            }
         })
     }
 
@@ -148,6 +183,13 @@ impl SenderContext {
             }
             Self::X25519HkdfSha256(SenderContextX25519HkdfSha256::HkdfSha256(
                 SenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+
+            #[cfg(feature = "k256")]
+            Self::K256(SenderContextK256::HkdfSha256(
+                SenderContextK256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -228,6 +270,17 @@ impl HpkeS {
                 SenderContextX25519HkdfSha256::HkdfSha256,
                 SenderContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305,
             },
+
+            #[cfg(feature = "k256")]
+            {
+                Kem::K256Sha256 => DhK256HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::ChaCha20Poly1305 => ChaCha20Poly1305,
+                PublicKey::K256,
+                SenderContext::K256,
+                SenderContextK256::HkdfSha256,
+                SenderContextK256HkdfSha256::ChaCha20Poly1305,
+            },
         ]};
 
         Ok(Self {
@@ -275,12 +328,25 @@ enum ReceiverContextX25519HkdfSha256HkdfSha256 {
     ChaCha20Poly1305(Box<AeadCtxR<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>>),
 }
 
+#[cfg(feature = "k256")]
+enum ReceiverContextK256HkdfSha256 {
+    ChaCha20Poly1305(Box<AeadCtxR<ChaCha20Poly1305, HkdfSha256, DhK256HkdfSha256>>),
+}
+
 enum ReceiverContextX25519HkdfSha256 {
     HkdfSha256(ReceiverContextX25519HkdfSha256HkdfSha256),
 }
 
+#[cfg(feature = "k256")]
+enum ReceiverContextK256 {
+    HkdfSha256(ReceiverContextK256HkdfSha256),
+}
+
 enum ReceiverContext {
     X25519HkdfSha256(ReceiverContextX25519HkdfSha256),
+
+    #[cfg(feature = "k256")]
+    K256(ReceiverContextK256),
 }
 
 impl ReceiverContext {
@@ -310,6 +376,20 @@ impl ReceiverContext {
                 context.open_in_place_detached(ct, aad, &tag)?;
                 ct
             }
+
+            #[cfg(feature = "k256")]
+            Self::K256(ReceiverContextK256::HkdfSha256(
+                ReceiverContextK256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                if ciphertext.len() < AeadTag::<ChaCha20Poly1305>::size() {
+                    return Err(Error::Truncated);
+                }
+                let (ct, tag_slice) =
+                    ciphertext.split_at_mut(ciphertext.len() - AeadTag::<ChaCha20Poly1305>::size());
+                let tag = AeadTag::<ChaCha20Poly1305>::from_bytes(tag_slice)?;
+                context.open_in_place_detached(ct, aad, &tag)?;
+                ct
+            }
         })
     }
 
@@ -322,6 +402,13 @@ impl ReceiverContext {
             }
             Self::X25519HkdfSha256(ReceiverContextX25519HkdfSha256::HkdfSha256(
                 ReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305(context),
+            )) => {
+                context.export(info, out_buf)?;
+            }
+
+            #[cfg(feature = "k256")]
+            Self::K256(ReceiverContextK256::HkdfSha256(
+                ReceiverContextK256HkdfSha256::ChaCha20Poly1305(context),
             )) => {
                 context.export(info, out_buf)?;
             }
@@ -399,6 +486,17 @@ impl HpkeR {
                 ReceiverContextX25519HkdfSha256::HkdfSha256,
                 ReceiverContextX25519HkdfSha256HkdfSha256::ChaCha20Poly1305,
             },
+
+            #[cfg(feature = "k256")]
+            {
+                Kem::K256Sha256 => DhK256HkdfSha256,
+                Kdf::HkdfSha256 => HkdfSha256,
+                Aead::ChaCha20Poly1305 => ChaCha20Poly1305,
+                PrivateKey::K256,
+                ReceiverContext::K256,
+                ReceiverContextK256::HkdfSha256,
+                ReceiverContextK256HkdfSha256::ChaCha20Poly1305,
+            },
         ]};
 
         Ok(Self { context, config })
@@ -412,6 +510,11 @@ impl HpkeR {
         Ok(match kem {
             Kem::X25519Sha256 => {
                 PublicKey::X25519(<X25519HkdfSha256 as KemTrait>::PublicKey::from_bytes(k)?)
+            }
+
+            #[cfg(feature = "k256")]
+            Kem::K256Sha256 => {
+                PublicKey::K256(<DhK256HkdfSha256 as KemTrait>::PublicKey::from_bytes(k)?)
             }
         })
     }
@@ -448,6 +551,12 @@ pub fn generate_key_pair(kem: Kem) -> Res<(PrivateKey, PublicKey)> {
             let (sk, pk) = X25519HkdfSha256::gen_keypair(&mut csprng);
             (PrivateKey::X25519(sk), PublicKey::X25519(pk))
         }
+
+        #[cfg(feature = "k256")]
+        Kem::K256Sha256 => {
+            let (sk, pk) = DhK256HkdfSha256::gen_keypair(&mut csprng);
+            (PrivateKey::K256(sk), PublicKey::K256(pk))
+        }
     };
     trace!("Generated key pair: sk={:?} pk={:?}", sk, pk);
     Ok((sk, pk))
@@ -459,6 +568,12 @@ pub fn derive_key_pair(kem: Kem, ikm: &[u8]) -> Res<(PrivateKey, PublicKey)> {
         Kem::X25519Sha256 => {
             let (sk, pk) = X25519HkdfSha256::derive_keypair(ikm);
             (PrivateKey::X25519(sk), PublicKey::X25519(pk))
+        }
+
+        #[cfg(feature = "k256")]
+        Kem::K256Sha256 => {
+            let (sk, pk) = DhK256HkdfSha256::derive_keypair(ikm);
+            (PrivateKey::K256(sk), PublicKey::K256(pk))
         }
     };
     trace!("Derived key pair: sk={:?} pk={:?}", sk, pk);
